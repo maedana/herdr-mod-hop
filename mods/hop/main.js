@@ -1,3 +1,6 @@
+// Derived from the `picker` mod shipped with herdr-app (https://github.com/herdrdev/herdr-app),
+// licensed under the Apache License 2.0. Modified: tree of spaces/tabs/panes, normal/insert/hint
+// modes, live preview of the selected place, window overlay. See LICENSE.
 // Go to a space, tab or pane. Every space in order as a tree: space rows,
 // their tabs (settled ones dimmed), and the panes of tabs with more than one.
 // Type to filter, ↑/↓ to show a row's place behind the window as you go, Enter
