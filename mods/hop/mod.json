@@ -1,0 +1,12 @@
+{
+  "place": "none",
+  "title": "Picker",
+  "overlay": {
+    "kind": "window",
+    "width": 640
+  },
+  "cloned_from": {
+    "name": "picker",
+    "version": "0.1.16"
+  }
+}
