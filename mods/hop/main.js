@@ -5,12 +5,10 @@
 // f (normal mode) puts a hint on each space, tab and pane row in view; typing
 // a hint goes to its row (backspace takes a letter back, Esc or a letter no
 // hint has leaves the hints).
-// Last rows: new work (a tab here, a space on this computer or on each
-// connected machine).
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, panes, focused, terminals, run, hc, home, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { agents, spaces, panes, focused, terminals, run, home, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
 import { hintLabels, matchHints, ALPHABET } from "./hints.js";
 
 // A pane's folder with home as ~.
@@ -84,17 +82,9 @@ export default class Picker extends View {
     this.closed = false;
     this.acx = cx;
     this.scroll = 0;
-    this.machines = [];
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.timer.after(600, () => { if (!this.insert) this.handle.focus(); });
-    cx.spawn(async (cx) => {
-      try {
-        const r = await hc(["machine", "ls", "--json"]);
-        if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => m.state === "connected" && !m.temporary).map((m) => m.name);
-      } catch {}
-      cx.notify();
-    });
   }
 
   close() {
@@ -138,13 +128,10 @@ export default class Picker extends View {
       out.push({ kind: "space", w, hit: spaceHit });
       out.push(...body);
     }
-    out.push({ kind: "new" });
-    out.push({ kind: "space-new", machine: null });
-    for (const m of this.machines) out.push({ kind: "space-new", machine: m });
     return out;
   }
 
-  // A row's place, the same for the row whichever filter shows it; new rows have none.
+  // A row's place, the same for the row whichever filter shows it.
   placeKey(r) {
     if (r?.kind === "space") return `s:${r.w.id}`;
     if (r?.kind === "tab") return `t:${r.ctx.id}`;
@@ -164,7 +151,7 @@ export default class Picker extends View {
     }
   }
 
-  // The selection moved: show its place, once per place (new rows do nothing).
+  // The selection moved: show its place, once per place.
   switchTo(r) {
     const k = this.placeKey(r);
     if (!k || k === this.shown) return;
@@ -189,24 +176,22 @@ export default class Picker extends View {
     else this.handle.focus();
   }
 
-  // Enter or a click: make a new tab or space, or go to the row's place (shown
-  // already after moving to it; a click may pick another), and close.
+  // Enter or a click: go to the row's place (shown already after moving to it;
+  // a click may pick another), and close.
   go(r, _cx) {
     if (!r) return;
     this.close();
-    if (r.kind === "new") run("tab.new");
-    else if (r.kind === "space-new") run("space.new", { machine: r.machine ?? "" });
-    else this.show(r);
+    this.show(r);
   }
 
-  // Every row's place (or kind) in order: hints are dropped when it changes.
+  // Every row's place in order: hints are dropped when it changes.
   listSig(rows) {
-    return rows.map((r) => this.placeKey(r) ?? r.kind).join("|");
+    return rows.map((r) => this.placeKey(r)).join("|");
   }
 
   // Hints for the space, tab and pane rows in view, top to bottom.
   startHints(rows, inView) {
-    const keys = rows.filter((r, i) => inView(i) && this.placeKey(r)).map((r) => this.placeKey(r));
+    const keys = rows.filter((r, i) => inView(i)).map((r) => this.placeKey(r));
     if (!keys.length) return;
     this.hint = { keys, labels: hintLabels(keys.length), typed: "", sig: this.listSig(rows) };
   }
@@ -278,13 +263,13 @@ export default class Picker extends View {
       // That place is already shown: moving off it and back switches, opening doesn't.
       this.shown = this.placeKey(rows[this.at]);
     }
-    this.at = Math.min(this.at, pickable.length - 1);
+    this.at = Math.max(0, Math.min(this.at, pickable.length - 1));
     if (this.hint && this.hint.sig !== this.listSig(rows)) this.hint = null;
     const sel = pickable[this.at];
     // One continuous strip: each row at a fixed y. Scrolling moves the strip only
     // as far as it takes to keep the selected row in view, so the arrows can't
     // run the selection off the list.
-    const H = { space: 36, tab: 32, pane: 28, new: 36, "space-new": 32 };
+    const H = { space: 36, tab: 32, pane: 28 };
     const tops = [];
     let y = 0;
     rows.forEach((r) => { tops.push(y); y += H[r.kind] ?? 32; });
@@ -354,25 +339,6 @@ export default class Picker extends View {
           .child(div().flex_1().min_w(0).truncate().text_color(r.ctx.settled ? t.dim : t.muted).child(title))
           .child(div().flex_none().max_w(220).truncate().text_size(11).text_color(t.dim).child(folder(r.p.cwd)));
       }
-      if (r.kind === "new" || r.kind === "space-new") {
-        const label = r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
-        return h_flex()
-          .id(r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
-          .mx(4)
-          .when(r.kind === "new", (el) => el.mt(4))
-          .px(10)
-          .h(32)
-          .items_center()
-          .rounded(7)
-          .gap(8)
-          .text_color(t.muted)
-          .cursor_pointer()
-          .when(on, (el) => el.bg(t.hover))
-          .hover((s) => s.bg(t.hover))
-          .on_click(() => this.go(r))
-          .child(div().w(12).child("+"))
-          .child(label);
-      }
       // A lone pane is told here; with more, the agents in it (each pane has its row below).
       const who = r.panes.length === 1 ? paneName(r.panes[0]) : r.mine.map((a) => a.program?.name ?? "agent").join(" · ");
       const here = r.w.active && r.ctx.active;
@@ -419,6 +385,8 @@ export default class Picker extends View {
           if (!this.insert && Date.now() - this.blurredAt > 100) return this.close();
           this.insert = false;
           this.handle.focus();
+        } else if (!pickable.length && (k === "down" || k === "up" || (normal && (k === "j" || k === "k")))) {
+          // nothing to move over
         } else if (k === "down" || (normal && k === "j")) {
           this.at = (this.at + 1) % pickable.length;
           this.switchTo(pickable[this.at]);
