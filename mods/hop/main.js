@@ -1,6 +1,7 @@
 // Go to a space, tab or pane. Every space in order as a tree: space rows,
 // their tabs (settled ones dimmed), and the panes of tabs with more than one.
-// Type to filter, ↑/↓ and Enter to go, ctrl+d to close a tab, Esc to leave.
+// Type to filter, ↑/↓ to show a row's place behind the window as you go, Enter
+// to stay there (a click: go to that row), ctrl+d to close a tab, Esc to leave.
 // Last rows: new work (a tab here, a space on this computer or on each
 // connected machine).
 
@@ -50,7 +51,9 @@ export default class Picker extends View {
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
       // Filtering picks the first row that matched itself; clearing goes back to where you are.
-      this.at = this.filter ? Math.max(0, this.rows().findIndex((r) => r.hit)) : null;
+      const rows = this.rows();
+      this.at = this.filter ? Math.max(0, rows.findIndex((r) => r.hit)) : null;
+      if (this.at !== null) this.switchTo(rows[this.at]);
       cx.notify();
     });
     this.input.on("submit", (_e, cx) => this.go(this.rows()[this.at], cx));
@@ -60,8 +63,20 @@ export default class Picker extends View {
     this.blurredAt = 0;
     // The Input handles Esc itself and blurs first, so the same Esc then bubbles to the root
     // with insert already false; blurredAt lets that Esc be told apart from a normal-mode one.
-    this.input.on("blur", (_e, cx) => { this.insert = false; this.blurredAt = Date.now(); cx.notify(); });
+    // A blur while switching is the switch taking the keyboard, not the user leaving the input.
+    this.input.on("blur", (_e, cx) => {
+      if (this.switching) return;
+      this.insert = false;
+      this.blurredAt = Date.now();
+      cx.notify();
+    });
     this.at = null;
+    // The row whose place is shown behind the window (see switchTo); set to where you are on opening.
+    this.shown = null;
+    this.switching = false;
+    this.switches = 0;
+    this.closed = false;
+    this.acx = cx;
     this.scroll = 0;
     this.machines = [];
     this.handle = cx.focus_handle();
@@ -77,6 +92,7 @@ export default class Picker extends View {
   }
 
   close() {
+    this.closed = true;
     closeOverlay(props().overlay);
   }
 
@@ -122,9 +138,16 @@ export default class Picker extends View {
     return out;
   }
 
-  go(r, _cx) {
-    if (!r) return;
-    this.close();
+  // A row's place, the same for the row whichever filter shows it; new rows have none.
+  placeKey(r) {
+    if (r?.kind === "space") return `s:${r.w.id}`;
+    if (r?.kind === "tab") return `t:${r.ctx.id}`;
+    if (r?.kind === "pane") return `p:${r.p.pane}`;
+    return null;
+  }
+
+  // Shows a space, tab or pane row's place behind the window.
+  show(r) {
     if (r.kind === "space") run("space.select", { id: r.w.id });
     else if (r.kind === "tab") run("tab.select", { id: r.ctx.id });
     else if (r.kind === "pane") {
@@ -132,8 +155,42 @@ export default class Picker extends View {
       // another space, show its tab first, as tab.select does for any space.
       if (r.w.id !== focused()?.space) run("tab.select", { id: r.ctx.id });
       run("pane.focus", { pane: r.p.pane });
-    } else if (r.kind === "new") run("tab.new");
+    }
+  }
+
+  // The selection moved: show its place, once per place (new rows do nothing).
+  switchTo(r) {
+    const k = this.placeKey(r);
+    if (!k || k === this.shown) return;
+    this.shown = k;
+    // Switching hands the keyboard to the pane it shows; take it back for the mode
+    // we're in, now and again once the switch has settled. Blurs meanwhile are ignored.
+    const n = ++this.switches;
+    this.switching = true;
+    this.show(r);
+    this.refocus();
+    this.acx.timer.after(16, () => this.refocus());
+    this.acx.timer.after(120, () => {
+      if (n !== this.switches) return;
+      this.switching = false;
+      this.refocus();
+    });
+  }
+
+  refocus() {
+    if (this.closed) return;
+    if (this.insert) this.input.focus();
+    else this.handle.focus();
+  }
+
+  // Enter or a click: make a new tab or space, or go to the row's place (shown
+  // already after moving to it; a click may pick another), and close.
+  go(r, _cx) {
+    if (!r) return;
+    this.close();
+    if (r.kind === "new") run("tab.new");
     else if (r.kind === "space-new") run("space.new", { machine: r.machine ?? "" });
+    else this.show(r);
   }
 
   glyph(t, st) {
@@ -152,6 +209,8 @@ export default class Picker extends View {
       if (i < 0 && fo?.tab) i = rows.findIndex((r) => r.kind === "tab" && r.ctx.id === fo.tab);
       if (i < 0) i = rows.findIndex((r) => r.kind === "tab" && r.w.active && r.ctx.active);
       this.at = Math.max(0, i);
+      // That place is already shown: moving off it and back switches, opening doesn't.
+      this.shown = this.placeKey(rows[this.at]);
     }
     this.at = Math.min(this.at, pickable.length - 1);
     const sel = pickable[this.at];
@@ -286,8 +345,13 @@ export default class Picker extends View {
           if (!this.insert && Date.now() - this.blurredAt > 100) return this.close();
           this.insert = false;
           this.handle.focus();
-        } else if (k === "down" || (normal && k === "j")) this.at = (this.at + 1) % pickable.length;
-        else if (k === "up" || (normal && k === "k")) this.at = (this.at + pickable.length - 1) % pickable.length;
+        } else if (k === "down" || (normal && k === "j")) {
+          this.at = (this.at + 1) % pickable.length;
+          this.switchTo(pickable[this.at]);
+        } else if (k === "up" || (normal && k === "k")) {
+          this.at = (this.at + pickable.length - 1) % pickable.length;
+          this.switchTo(pickable[this.at]);
+        }
         else if (normal && k === "enter") this.go(sel, cx);
         else if (normal && k === "i") {
           this.insert = true;
@@ -326,6 +390,7 @@ export default class Picker extends View {
               // The selection follows the wheel, so the next frame doesn't scroll back to it.
               while (this.at < pickable.length - 1 && tops[rows.indexOf(pickable[this.at])] < this.scroll) this.at++;
               while (this.at > 0 && tops[rows.indexOf(pickable[this.at])] + (H[pickable[this.at].kind] ?? 32) > this.scroll + height) this.at--;
+              this.switchTo(pickable[this.at]);
               cx.notify();
             }))
           .children(rows.map((r, i) => (visible(i) ? place(row(r), i) : null)).filter(Boolean)),
