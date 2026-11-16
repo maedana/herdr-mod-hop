@@ -1,12 +1,21 @@
-// Go to a tab. Drops from the Terminals layout's space chip (window). Spaces with
-// something that needs you come first, quiet spaces (no agent running)
-// fold into "earlier". Type to filter, ↑/↓ and Enter to go, ctrl+d to close
-// a tab, Esc to leave. Last rows: new work (a tab here, a space on this
-// computer or on each connected machine).
+// Go to a space, tab or pane. Every space in order as a tree: space rows,
+// their tabs (settled ones dimmed), and the panes of tabs with more than one.
+// Type to filter, ↑/↓ and Enter to go, ctrl+d to close a tab, Esc to leave.
+// Last rows: new work (a tab here, a space on this computer or on each
+// connected machine).
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, terminals, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { agents, spaces, panes, focused, terminals, run, hc, home, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+
+// A pane's folder with home as ~.
+function folder(cwd) {
+  if (!cwd) return "";
+  const h = home();
+  return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
+}
+// What runs in a pane: the mod's name for a mod pane, else the program's.
+const paneName = (p) => p.mod ?? p.program?.name ?? "";
 
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
@@ -40,10 +49,11 @@ export default class Picker extends View {
     this.input = InputState.new({ placeholder: "Go to a tab, space or agent…" });
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
-      this.at = this.filter ? Math.max(0, this.rows().filter(r => r.kind !== "head").findIndex(r => r.kind === "ctx")) : 0;
+      // Filtering picks the first row that matched itself; clearing goes back to where you are.
+      this.at = this.filter ? Math.max(0, this.rows().findIndex((r) => r.hit)) : null;
       cx.notify();
     });
-    this.input.on("submit", (_e, cx) => this.go(this.rows().filter(r => r.kind !== "head")[this.at], cx));
+    this.input.on("submit", (_e, cx) => this.go(this.rows()[this.at], cx));
     // Modes: insert = the input has the keyboard, normal = the root (this.handle) does.
     this.insert = false;
     this.input.on("focus", (_e, cx) => { this.insert = true; cx.notify(); });
@@ -53,7 +63,6 @@ export default class Picker extends View {
     this.input.on("blur", (_e, cx) => { this.insert = false; this.blurredAt = Date.now(); cx.notify(); });
     this.at = null;
     this.scroll = 0;
-    this.showEarlier = false;
     this.machines = [];
     this.handle = cx.focus_handle();
     this.handle.focus();
@@ -71,9 +80,15 @@ export default class Picker extends View {
     closeOverlay(props().overlay);
   }
 
+  // Every space in order: a space row, its tabs, and the panes of each tab with more
+  // than one (a lone pane is told on its tab row). Every row can be picked.
+  // Filtering keeps what matches and the tab and space it sits in; `hit` marks
+  // the rows that matched themselves.
   rows() {
     const f = this.filter.toLowerCase();
+    const has = (...xs) => !f || xs.join(" ").toLowerCase().includes(f);
     const all = agents();
+    const ps = panes();
     const live = terminals().filter((x) => x.state === "live");
     const teamOf = (addrs) => {
       let n = 0;
@@ -81,48 +96,44 @@ export default class Picker extends View {
       addrs.forEach(walk);
       return n;
     };
-    const groups = spaces().map((w) => {
-      const ctxs = w.tabs
-        .map((ctx) => {
-          const mine = all.filter((a) => a.tab === ctx.id);
-          return { w, ctx, mine, team: teamOf(mine.map((a) => a.address)) };
-        })
-        .filter((c) => !f || [w.name, c.ctx.name, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
-      return { w, ctxs };
-    });
-    const busy = groups.filter((p) => p.w.status && p.ctxs.length);
-    const quiet = groups.filter((p) => !p.w.status && p.ctxs.length);
-    busy.sort((a, b) => (b.w.status === "blocked") - (a.w.status === "blocked"));
     const out = [];
-    const add = (p) => {
-      out.push({ kind: "head", w: p.w });
-      for (const c of p.ctxs) out.push({ kind: "ctx", ...c });
-    };
-    busy.forEach(add);
-    if (quiet.length) {
-      out.push({ kind: "earlier", count: quiet.length });
-      if (this.showEarlier || f) quiet.forEach(add);
+    for (const w of spaces()) {
+      const spaceHit = has(w.name);
+      const body = [];
+      for (const ctx of w.tabs) {
+        const mine = all.filter((a) => a.tab === ctx.id);
+        const own = ps.filter((p) => p.tab === ctx.id);
+        const paneHits = own.filter((p) => has(paneName(p), p.title ?? "", folder(p.cwd)));
+        const many = own.length > 1;
+        const tabHit = has(ctx.name, ...mine.map((a) => a.program?.name ?? "")) || (!many && paneHits.length > 0);
+        if (!spaceHit && !tabHit && !paneHits.length) continue;
+        body.push({ kind: "tab", w, ctx, mine, panes: own, team: teamOf(mine.map((a) => a.address)), hit: tabHit });
+        if (many) {
+          for (const p of spaceHit || tabHit ? own : paneHits) body.push({ kind: "pane", w, ctx, p, hit: paneHits.includes(p) });
+        }
+      }
+      if (!spaceHit && !body.length) continue;
+      out.push({ kind: "space", w, hit: spaceHit });
+      out.push(...body);
     }
     out.push({ kind: "new" });
-    out.push({ kind: "space", machine: null });
-    for (const m of this.machines) out.push({ kind: "space", machine: m });
+    out.push({ kind: "space-new", machine: null });
+    for (const m of this.machines) out.push({ kind: "space-new", machine: m });
     return out;
   }
 
-  go(r, cx) {
+  go(r, _cx) {
     if (!r) return;
-    if (r.kind === "earlier") {
-      this.at = this.rows().filter(r => r.kind !== "head").findIndex(r => r.kind === "earlier");
-      this.showEarlier = !this.showEarlier;
-      if (this.insert) this.input.focus();
-      else this.handle.focus();
-      cx.notify();
-      return;
-    }
     this.close();
-    if (r.kind === "ctx") run("tab.select", { id: r.ctx.id });
-    else if (r.kind === "new") run("tab.new");
-    else if (r.kind === "space") run("space.new", { machine: r.machine ?? "" });
+    if (r.kind === "space") run("space.select", { id: r.w.id });
+    else if (r.kind === "tab") run("tab.select", { id: r.ctx.id });
+    else if (r.kind === "pane") {
+      // pane.focus shows a pane in another tab of the shown space (checked); for
+      // another space, show its tab first, as tab.select does for any space.
+      if (r.w.id !== focused()?.space) run("tab.select", { id: r.ctx.id });
+      run("pane.focus", { pane: r.p.pane });
+    } else if (r.kind === "new") run("tab.new");
+    else if (r.kind === "space-new") run("space.new", { machine: r.machine ?? "" });
   }
 
   glyph(t, st) {
@@ -133,20 +144,26 @@ export default class Picker extends View {
   render() {
     const t = theme();
     const rows = this.rows();
-    const pickable = rows.filter((r) => r.kind !== "head");
-    // Opens on where you are.
-    if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
+    const pickable = rows;
+    // Opens on where you are: the focused pane, else its tab (a lone pane has no row).
+    if (this.at === null) {
+      const fo = focused();
+      let i = fo?.pane ? rows.findIndex((r) => r.kind === "pane" && r.p.pane === fo.pane) : -1;
+      if (i < 0 && fo?.tab) i = rows.findIndex((r) => r.kind === "tab" && r.ctx.id === fo.tab);
+      if (i < 0) i = rows.findIndex((r) => r.kind === "tab" && r.w.active && r.ctx.active);
+      this.at = Math.max(0, i);
+    }
     this.at = Math.min(this.at, pickable.length - 1);
     const sel = pickable[this.at];
-    // One continuous strip: each row (and the group title before it) at a fixed
-    // y. Scrolling moves the strip only as far as it takes to keep the selected
-    // row in view, so the arrows can't run the selection off the list.
-    const H = { head: 29, earlier: 35, new: 36, ctx: 32, space: 32 };
+    // One continuous strip: each row at a fixed y. Scrolling moves the strip only
+    // as far as it takes to keep the selected row in view, so the arrows can't
+    // run the selection off the list.
+    const H = { space: 36, tab: 32, pane: 28, new: 36, "space-new": 32 };
     const tops = [];
     let y = 0;
     rows.forEach((r) => { tops.push(y); y += H[r.kind] ?? 32; });
     const total = y;
-    const height = Math.min(320, this.listHeight ?? 320);
+    const height = Math.min(480, this.listHeight ?? 480);
     const fixed = total > height;
     const maxScroll = Math.max(0, total - height);
     this.scroll = Math.max(0, Math.min(this.scroll, maxScroll));
@@ -162,37 +179,54 @@ export default class Picker extends View {
     const visible = (i) => !fixed || (tops[i] + (H[rows[i].kind] ?? 32) > this.scroll && tops[i] < this.scroll + height);
 
     const row = (r) => {
-      if (r.kind === "head") {
+      const on = r === sel;
+      if (r.kind === "space") {
+        // The space's colored initial and name; the gap above sets the groups apart.
+        return div().pt(4).child(
+          h_flex()
+            .id(`pk-sp-${r.w.id}`)
+            .mx(4)
+            .px(10)
+            .h(32)
+            .rounded(7)
+            .gap(8)
+            .items_center()
+            .text_size(11)
+            .font_semibold()
+            .text_color(on ? t.foreground : t.dim)
+            .cursor_pointer()
+            .when(on, (el) => el.bg(t.hover))
+            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click(() => this.go(r))
+            .child(h_flex().size(18).flex_none().rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
+            .child(div().flex_1().truncate().child(r.w.name)),
+        );
+      }
+      if (r.kind === "pane") {
+        // One step in from its tab: status, program, title, and the folder on the right.
+        const name = paneName(r.p);
+        const title = r.p.title && r.p.title !== name ? r.p.title : "";
+        const here = r.w.active && r.ctx.active && r.p.focused;
         return h_flex()
-          .px(10)
-          .pt(10)
-          .pb(3)
+          .id(`pk-p-${r.p.pane}`)
+          .mx(4)
+          .pl(32)
+          .pr(10)
+          .h(28)
+          .rounded(7)
           .gap(8)
           .items_center()
-          .text_size(11)
-          .font_semibold()
-          .text_color(t.dim)
-          .child(h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
-          .child(r.w.name);
-      }
-      if (r.kind === "earlier") {
-        return h_flex()
-          .id("pk-earlier")
-          .mt(6)
-          .px(10)
-          .py(6)
-          .border_t(1)
-          .border_color(t.border)
           .text_size(12)
-          .text_color(t.dim)
           .cursor_pointer()
-          .when(r === sel, (el) => el.bg(t.hover).text_color(t.foreground))
-          .hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => this.go(r, cx))
-          .child(`earlier: ${r.count} quiet space${r.count > 1 ? "s" : ""} ${this.showEarlier ? "▴" : "▾"}`);
+          .when(on, (el) => el.bg(t.hover))
+          .hover((s) => s.bg(t.hover))
+          .on_click(() => this.go(r))
+          .child(this.glyph(t, r.p.status))
+          .child(div().flex_none().text_color(r.ctx.settled ? t.dim : t.foreground).when(here, (d) => d.font_semibold()).child(name))
+          .child(div().flex_1().min_w(0).truncate().text_color(r.ctx.settled ? t.dim : t.muted).child(title))
+          .child(div().flex_none().max_w(220).truncate().text_size(11).text_color(t.dim).child(folder(r.p.cwd)));
       }
-      const on = r === sel;
-      if (r.kind === "new" || r.kind === "space") {
+      if (r.kind === "new" || r.kind === "space-new") {
         const label = r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
         return h_flex()
           .id(r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
@@ -211,7 +245,8 @@ export default class Picker extends View {
           .child(div().w(12).child("+"))
           .child(label);
       }
-      const who = r.mine.map((a) => a.program?.name ?? "agent").join(" · ");
+      // A lone pane is told here; with more, the agents in it (each pane has its row below).
+      const who = r.panes.length === 1 ? paneName(r.panes[0]) : r.mine.map((a) => a.program?.name ?? "agent").join(" · ");
       const here = r.w.active && r.ctx.active;
       return h_flex()
         .id(`pk-${r.ctx.id}`)
@@ -226,7 +261,7 @@ export default class Picker extends View {
         .hover((s) => s.bg(t.hover))
         .on_click(() => this.go(r))
         .child(this.glyph(t, r.ctx.status))
-        .child(div().flex_1().truncate().text_color(t.foreground).when(here, (d) => d.font_semibold()).child(r.ctx.name))
+        .child(div().flex_1().truncate().text_color(r.ctx.settled ? t.dim : t.foreground).when(here, (d) => d.font_semibold()).child(r.ctx.name))
         .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child("needs you")))
         .when(r.ctx.status === "done", (el) => el.child(div().text_size(11).text_color(t.done).child("finished")))
         .child(div().text_size(11).text_color(t.dim).child(who + (r.team ? `  +${r.team}` : "")));
@@ -259,7 +294,7 @@ export default class Picker extends View {
           this.input.focus();
         } else if (normal && k === "q") return this.close();
         else if (k === "d" && e.modifiers.control) {
-          if (sel?.kind === "ctx") {
+          if (sel?.kind === "tab") {
             this.close();
             run("tab.close", { id: sel.ctx.id });
           }
@@ -282,7 +317,7 @@ export default class Picker extends View {
             this.listHeight = size.height / settings().zoom;
             cx.notify();
           })
-          .h(Math.min(320, total))
+          .h(Math.min(480, total))
           .min_h(0)
           .mb(6)
           .when(fixed, (el) =>
