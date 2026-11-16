@@ -471,6 +471,23 @@ export default class Picker extends View {
               cx.notify();
             }))
           .children(rows.map((r, i) => (visible(i) ? place(row(r), i) : null)).filter(Boolean)),
-      );
+      )
+      .child(this.footer(t));
+  }
+
+  // The keys of the mode we're in (same test as the badge), one dim line under the list.
+  // Pairs of [keys, what]; keys are set a shade brighter than the words.
+  footer(t) {
+    const help = this.hint
+      ? [["", "type a hint to jump"], ["backspace", "undo"], ["esc", "cancel"]]
+      : this.insert
+        ? [["", "type to filter"], ["↑/↓", "move"], ["esc", "normal"], ["enter", "close"]]
+        : [["j/k", "move"], ["f", "hint"], ["i", "search"], ["enter/esc/q", "close"]];
+    const parts = [];
+    help.forEach(([keys, what], i) => {
+      if (i > 0) parts.push(div().child("·"));
+      parts.push(h_flex().gap(4).when(!!keys, (el) => el.child(div().text_color(t.muted).child(keys))).child(div().child(what)));
+    });
+    return h_flex().flex_none().pt(8).gap(6).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim).children(parts);
   }
 }
