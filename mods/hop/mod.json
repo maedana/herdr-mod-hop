@@ -3,7 +3,8 @@
   "title": "Picker",
   "overlay": {
     "kind": "window",
-    "width": 640
+    "width": 640,
+    "frame": "none"
   },
   "cloned_from": {
     "name": "picker",

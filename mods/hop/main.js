@@ -10,6 +10,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, spaces, panes, focused, terminals, run, home, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
 import { hintLabels, matchHints, ALPHABET } from "./hints.js";
+import { withAlpha } from "./color.js";
 
 // A pane's folder with home as ~.
 function folder(cwd) {
@@ -369,7 +370,13 @@ export default class Picker extends View {
       .min_h(0)
       .p(18)
       .gap(10)
-      .bg(t.popover)
+      // frame "none": Herdr draws no background, border, corners or shadow, so the
+      // root does, with the background 70% opaque.
+      .rounded(10)
+      .border_1()
+      .border_color(t.border)
+      .shadow_lg()
+      .bg(withAlpha(t.popover, 0.7))
       .text_size(13)
       .on_key_down((e, cx) => {
         const k = e.key;
