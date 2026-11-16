@@ -2,12 +2,16 @@
 // their tabs (settled ones dimmed), and the panes of tabs with more than one.
 // Type to filter, ↑/↓ to show a row's place behind the window as you go, Enter
 // to stay there (a click: go to that row), ctrl+d to close a tab, Esc to leave.
+// f (normal mode) puts a hint on each space, tab and pane row in view; typing
+// a hint goes to its row (backspace takes a letter back, Esc or a letter no
+// hint has leaves the hints).
 // Last rows: new work (a tab here, a space on this computer or on each
 // connected machine).
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, spaces, panes, focused, terminals, run, hc, home, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { hintLabels, matchHints, ALPHABET } from "./hints.js";
 
 // A pane's folder with home as ~.
 function folder(cwd) {
@@ -59,7 +63,7 @@ export default class Picker extends View {
     this.input.on("submit", (_e, cx) => this.go(this.rows()[this.at], cx));
     // Modes: insert = the input has the keyboard, normal = the root (this.handle) does.
     this.insert = false;
-    this.input.on("focus", (_e, cx) => { this.insert = true; cx.notify(); });
+    this.input.on("focus", (_e, cx) => { this.insert = true; this.hint = null; cx.notify(); });
     this.blurredAt = 0;
     // The Input handles Esc itself and blurs first, so the same Esc then bubbles to the root
     // with insert already false; blurredAt lets that Esc be told apart from a normal-mode one.
@@ -71,6 +75,8 @@ export default class Picker extends View {
       cx.notify();
     });
     this.at = null;
+    // Hint mode: null, or { keys, labels, typed, sig } (see startHints).
+    this.hint = null;
     // The row whose place is shown behind the window (see switchTo); set to where you are on opening.
     this.shown = null;
     this.switching = false;
@@ -193,6 +199,66 @@ export default class Picker extends View {
     else this.show(r);
   }
 
+  // Every row's place (or kind) in order: hints are dropped when it changes.
+  listSig(rows) {
+    return rows.map((r) => this.placeKey(r) ?? r.kind).join("|");
+  }
+
+  // Hints for the space, tab and pane rows in view, top to bottom.
+  startHints(rows, inView) {
+    const keys = rows.filter((r, i) => inView(i) && this.placeKey(r)).map((r) => this.placeKey(r));
+    if (!keys.length) return;
+    this.hint = { keys, labels: hintLabels(keys.length), typed: "", sig: this.listSig(rows) };
+  }
+
+  // A key in hint mode. Returns true when it was taken; false lets the usual
+  // handling have it (the hints are gone by then).
+  hintKey(e, rows, cx) {
+    const m = e.modifiers;
+    const ch = e.key_char ?? (e.key.length === 1 ? e.key : "");
+    const typing = ch.length === 1 && ch > " ";
+    if (e.key === "escape") this.hint = null;
+    else if (e.key === "backspace") this.hint.typed = this.hint.typed.slice(0, -1);
+    else if (m.control || m.alt || m.platform || !typing) {
+      this.hint = null;
+      cx.notify();
+      return false;
+    } else if (m.shift) {
+      // Hints are lower case only: a shifted letter does nothing.
+    } else if (!ALPHABET.includes(ch)) this.hint = null;
+    else {
+      const typed = this.hint.typed + ch;
+      const { exact, candidates } = matchHints(this.hint.labels, typed);
+      if (exact !== null) {
+        const key = this.hint.keys[exact];
+        this.hint = null;
+        this.go(rows.find((r) => this.placeKey(r) === key), cx);
+      } else if (!candidates.length) this.hint = null;
+      else this.hint.typed = typed;
+    }
+    return true;
+  }
+
+  // The hint badge for a row while hinting, if its hint still fits what's typed.
+  hintBadge(t, r) {
+    if (!this.hint) return null;
+    const i = this.hint.keys.indexOf(this.placeKey(r));
+    const label = this.hint.labels[i];
+    const { typed } = this.hint;
+    if (i < 0 || !label.startsWith(typed)) return null;
+    return h_flex()
+      .flex_none()
+      .px(4)
+      .rounded(4)
+      .border_1()
+      .border_color(t.accent)
+      .bg(t.background)
+      .text_size(11)
+      .font_bold()
+      .when(typed.length > 0, (el) => el.child(div().text_color(t.dim).child(typed)))
+      .child(div().text_color(t.accent).child(label.slice(typed.length)));
+  }
+
   glyph(t, st) {
     if (st === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
     return div().w(12).flex_none().text_color(t[st] ?? t.dim).child(st === "idle" ? "○" : st ? "●" : "·");
@@ -213,6 +279,7 @@ export default class Picker extends View {
       this.shown = this.placeKey(rows[this.at]);
     }
     this.at = Math.min(this.at, pickable.length - 1);
+    if (this.hint && this.hint.sig !== this.listSig(rows)) this.hint = null;
     const sel = pickable[this.at];
     // One continuous strip: each row at a fixed y. Scrolling moves the strip only
     // as far as it takes to keep the selected row in view, so the arrows can't
@@ -257,6 +324,7 @@ export default class Picker extends View {
             .when(on, (el) => el.bg(t.hover))
             .hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_click(() => this.go(r))
+            .children([this.hintBadge(t, r)].filter(Boolean))
             .child(h_flex().size(18).flex_none().rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
             .child(div().flex_1().truncate().child(r.w.name)),
         );
@@ -280,6 +348,7 @@ export default class Picker extends View {
           .when(on, (el) => el.bg(t.hover))
           .hover((s) => s.bg(t.hover))
           .on_click(() => this.go(r))
+          .children([this.hintBadge(t, r)].filter(Boolean))
           .child(this.glyph(t, r.p.status))
           .child(div().flex_none().text_color(r.ctx.settled ? t.dim : t.foreground).when(here, (d) => d.font_semibold()).child(name))
           .child(div().flex_1().min_w(0).truncate().text_color(r.ctx.settled ? t.dim : t.muted).child(title))
@@ -319,6 +388,7 @@ export default class Picker extends View {
         .when(on, (el) => el.bg(t.hover))
         .hover((s) => s.bg(t.hover))
         .on_click(() => this.go(r))
+        .children([this.hintBadge(t, r)].filter(Boolean))
         .child(this.glyph(t, r.ctx.status))
         .child(div().flex_1().truncate().text_color(r.ctx.settled ? t.dim : t.foreground).when(here, (d) => d.font_semibold()).child(r.ctx.name))
         .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child("needs you")))
@@ -340,6 +410,10 @@ export default class Picker extends View {
         const m = e.modifiers;
         const plain = !m.control && !m.alt && !m.platform && !m.shift;
         const normal = !this.insert && plain;
+        if (this.hint && this.hintKey(e, rows, cx)) {
+          cx.stop_propagation();
+          return cx.notify();
+        }
         if (k === "escape") {
           // insert -> normal (the filter stays); normal -> close
           if (!this.insert && Date.now() - this.blurredAt > 100) return this.close();
@@ -353,6 +427,7 @@ export default class Picker extends View {
           this.switchTo(pickable[this.at]);
         }
         else if (normal && k === "enter") this.go(sel, cx);
+        else if (normal && k === "f") this.startHints(rows, visible);
         else if (normal && k === "i") {
           this.insert = true;
           this.input.focus();
@@ -366,7 +441,7 @@ export default class Picker extends View {
         cx.stop_propagation();
         cx.notify();
       })
-      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Go to…")).child(div().px(6).py(1).mr(6).rounded(5).border_1().border_color(this.insert ? t.dim : t.accent).text_size(10).font_semibold().text_color(this.insert ? t.dim : t.accent).child(this.insert ? "INSERT" : "NORMAL")).child(div().id("picker-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => this.close()).child("Esc")))
+      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Go to…")).child(div().px(6).py(1).mr(6).rounded(5).border_1().border_color(this.insert ? t.dim : t.accent).when(!!this.hint, (el) => el.bg(t.accent)).text_size(10).font_semibold().text_color(this.hint ? t.accent_foreground : this.insert ? t.dim : t.accent).child(this.hint ? "HINT" : this.insert ? "INSERT" : "NORMAL")).child(div().id("picker-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => this.close()).child("Esc")))
       .child(
         h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -386,6 +461,8 @@ export default class Picker extends View {
           .mb(6)
           .when(fixed, (el) =>
             el.overflow_hidden().on_scroll_wheel((e, cx) => {
+              // What's in view changes, so the hints would be on the wrong rows.
+              this.hint = null;
               this.scroll = Math.max(0, Math.min(this.scroll - e.delta.y, maxScroll));
               // The selection follows the wheel, so the next frame doesn't scroll back to it.
               while (this.at < pickable.length - 1 && tops[rows.indexOf(pickable[this.at])] < this.scroll) this.at++;
